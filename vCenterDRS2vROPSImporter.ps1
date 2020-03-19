@@ -1,6 +1,6 @@
 #Powershell collector script for DRS rules and pushing the results into vROPS.
 #v1.0 vMan.ch, 15.11.2019 - Initial Version
-
+#v1.1 vMan.ch, 18.03.2020 - Added logging, moved a loop, defined strings.
 <#
     Run the command below to store user and pass in secure credential XML for each environment
 
@@ -12,9 +12,9 @@ param
 (
   [Array]$vCenter,
   [String]$creds,
-	[String]$vRopsAddress,
-	[String]$vRopsCreds,
-	[String]$ImportType = 'Full'
+  [String]$vRopsAddress,
+  [String]$vRopsCreds,
+  [String]$ImportType = 'Full'
 )
 
 #Logging Function
@@ -263,6 +263,8 @@ Log -Message "Connecting to $VC with credentials $creds" -LogType "JOB-$RunDateT
 
 Connect-VIServer -server $VC -Credential $cred -Force 
 
+Write-Host "Running Get-DrsRule against $VC"
+Log -Message "Running Get-DrsRule against $VC" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
 
     $DRSRules = Get-Cluster | Get-DrsRule | select Name,Cluster,Enabled,Type,@{N='VMs';E={((Get-VM -ID $_.VMIDs).Name)}}
 
@@ -270,17 +272,18 @@ Connect-VIServer -server $VC -Credential $cred -Force
 
                 $DRSVMRuleReport += New-Object PSObject -Property @{
 
-                    Name = $rule.Name
-                    Cluster = $rule.Cluster
-                    Enabled = $rule.Enabled
-                    Type = $rule.Type
-                    VMs = ($rule.VMs) | Sort-Object
+                    Name = [String]$rule.Name
+                    Cluster = [String]$rule.Cluster
+                    Enabled = [String]$rule.Enabled
+                    Type = [String]$rule.Type
+                    VMs = [String]($rule.VMs) | Sort-Object
                     VC = [String]$VC
                 }
         }
 
 
-
+Write-Host "Running Get-DrsClusterGroup against $VC"
+Log -Message "Running Get-DrsClusterGroup against $VC" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
 
     $DRSClusterGroup = Get-Cluster | Get-DrsClusterGroup | select Name,Cluster,Grouptype,@{N='Member';E={($_.Member)}}
 
@@ -305,6 +308,9 @@ Connect-VIServer -server $VC -Credential $cred -Force
     }
 
 
+Write-Host "Running Get-DrsVMHostRule against $VC"
+Log -Message "Running Get-DrsVMHostRule against $VC" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+
     $DRSVMHostRule = Get-Cluster | Get-DrsVMHostRule | select Name,Cluster,VMGroup,Type,VMHostGroup,Enabled
 
         ForEach ($HostRule in $DRSVMHostRule){
@@ -314,27 +320,30 @@ Connect-VIServer -server $VC -Credential $cred -Force
 
                 $DRSVM2HOSTRuleReport += New-Object PSObject -Property @{
 
-                    Name = $HostRule.Name
-                    Cluster = $HostRule.Cluster
-                    VMGroup = $HostRule.VMGroup
-                    VMGroupMembers = $GroupLookup.Item($VMLookup)
-                    Type = $HostRule.Type
-                    VMHostGroup = $HostRule.VMHostGroup
-                    VMHostGroupMembers = $GroupLookup.Item($HostLookup)
-                    Enabled = $HostRule.Enabled
+                    Name = [String]$HostRule.Name
+                    Cluster = [String]$HostRule.Cluster
+                    VMGroup = [String]$HostRule.VMGroup
+                    VMGroupMembers = [String]$GroupLookup.Item($VMLookup)
+                    Type = [String]$HostRule.Type
+                    VMHostGroup = [String]$HostRule.VMHostGroup
+                    VMHostGroupMembers = [String]$GroupLookup.Item($HostLookup)
+                    Enabled = [String]$HostRule.Enabled
                     VC = [String]$VC
                 }
             }
+
+
+Write-Host "Disconnecting from $VC"
+Log -Message "Disconnecting from $VC" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+Disconnect-VIServer -Server $VC -Force -Confirm:$false
+
+}
 
     ##GROUP STUFF##
 
             $DRSVMRuleReport = $DRSVMRuleReport | Group-Object Cluster
             $DRSClusterGroupReport = $DRSClusterGroupReport | Group-Object Cluster
             $DRSVM2HOSTRuleReport = $DRSVM2HOSTRuleReport | Group-Object Cluster
-
-Disconnect-VIServer -Server $VC -Force -Confirm:$false
-
-}
 
 switch($ImportType)
     {
