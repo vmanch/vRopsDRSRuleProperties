@@ -1,6 +1,8 @@
 #Powershell collector script for DRS rules and pushing the results into vROPS.
 #v1.0 vMan.ch, 15.11.2019 - Initial Version
 #v1.1 vMan.ch, 18.03.2020 - Added logging, moved a loop, defined strings.
+#v1.2 vMan.ch, 19.03.2020 - Added Member counts as a new metric.
+
 <#
     Run the command below to store user and pass in secure credential XML for each environment
 
@@ -14,7 +16,7 @@ param
   [String]$creds,
   [String]$vRopsAddress,
   [String]$vRopsCreds,
-  [String]$ImportType = 'Full'
+  [String]$ImportType
 )
 
 #Logging Function
@@ -277,6 +279,7 @@ Log -Message "Running Get-DrsRule against $VC" -LogType "JOB-$RunDateTime" -LogF
                     Enabled = [String]$rule.Enabled
                     Type = [String]$rule.Type
                     VMs = [String]($rule.VMs) | Sort-Object
+                    Count = ($rule.VMs).Count
                     VC = [String]$VC
                 }
         }
@@ -295,6 +298,7 @@ Log -Message "Running Get-DrsClusterGroup against $VC" -LogType "JOB-$RunDateTim
                     Cluster = [String]$DRSGroup.Cluster
                     Grouptype = [String]$DRSGroup.Grouptype
                     Member = [String]($DRSGroup.Member) | Sort-Object
+                    Count = ($DRSGroup.Member).Count
                     VC = [String]$VC
                 }
         }
@@ -304,7 +308,7 @@ Log -Message "Running Get-DrsClusterGroup against $VC" -LogType "JOB-$RunDateTim
     $DRSClusterGroupReport | ForEach-Object -Begin {
         $GroupLookup = @{}
     } -Process {
-         $GroupLookup.add($_.Cluster + $_.Name +$_.Grouptype,$_.Member)
+         $GroupLookup.add($_.Cluster + $_.Name +$_.Grouptype,$_.Member+'$'+$_.Count)
     }
 
 
@@ -323,10 +327,12 @@ Log -Message "Running Get-DrsVMHostRule against $VC" -LogType "JOB-$RunDateTime"
                     Name = [String]$HostRule.Name
                     Cluster = [String]$HostRule.Cluster
                     VMGroup = [String]$HostRule.VMGroup
-                    VMGroupMembers = [String]$GroupLookup.Item($VMLookup)
+                    VMGroupMembers = [String]($GroupLookup.Item($VMLookup)).Split('$')[0]
+                    VMGroupMembersCount = [String]($GroupLookup.Item($VMLookup)).Split('$')[1]
                     Type = [String]$HostRule.Type
                     VMHostGroup = [String]$HostRule.VMHostGroup
-                    VMHostGroupMembers = [String]$GroupLookup.Item($HostLookup)
+                    VMHostGroupMembers = [String]($GroupLookup.Item($HostLookup)).Split('$')[0]
+                    VMHostGroupMembersCount = [String]($GroupLookup.Item($HostLookup)).Split('$')[1]
                     Enabled = [String]$HostRule.Enabled
                     VC = [String]$VC
                 }
@@ -349,6 +355,10 @@ switch($ImportType)
     {
 
     Full {
+
+########################
+## Pushing Properties ##
+########################
 
             Write-Host "Create XML's, lookup resourceId and pushing Custom DRS Properties to vRops for Clusters"
             Log -Message "Create XML's, lookup resourceId and pushing Custom DRS Properties to vRops for Clusters" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
@@ -567,8 +577,141 @@ switch($ImportType)
             Remove-Variable ClusterVM2HOSTRulesName -ErrorAction SilentlyContinue
             }
 
-            Write-Host "Done Importing Custom DRS properties Clusters into vROPS"
-            Log -Message "Done Importing Custom DRS properties Clusters into vROPS" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+
+
+########################
+### Pushing Metrics ####
+########################
+
+
+#Push in DRSVMRule Metrics
+
+$DRSVMRuleMetricXML = @()
+
+ForEach($DRSVMRuleMetric in $DRSVMRuleReport){ 
+
+
+   $DRSVMRuleMetricXML = @('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                    <ops:stat-contents xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ops="http://webservice.vmware.com/vRealizeOpsMgr/1.0/">')
+
+        ForEach ($DRSVMRuleMetricInsert in $DRSVMRuleMetric.group){
+
+            $DRSVMRuleMetricXML += @('<ops:stat-content statKey="VMAN|DRS|RULES|VM|{1}|VMRULEMEMBERSCOUNT">
+                                            <ops:timestamps>{0}</ops:timestamps>
+                                            <ops:data>{2}</ops:data>
+                                            <ops:unit>%</ops:unit>
+                                         </ops:stat-content>' -f $NowDateEpoc,
+                                                                 $DRSVMRuleMetricInsert.'Name',
+                                                                 $DRSVMRuleMetricInsert.'Count')
+            }
+
+
+    $DRSVMRuleMetricXML += @('</ops:stat-contents>')
+
+    [xml]$DRSVMRuleMetricXML = $DRSVMRuleMetricXML
+
+    $DRSVMRuleMetricName = $DRSVMRuleMetric.Name
+
+    $vRopsMetricURL = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+$resourceLookup.resourceId+'/stats'
+
+    Write-Host "Pushing DRSVMRule Metrics for cluster $DRSVMRuleMetricName to $vRopsMetricURL"
+    Log -Message "Pushing DRSVMRule Metrics for cluster $DRSVMRuleMetricName to $vRopsMetricURL" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+
+    Invoke-RestMethod -Method POST -uri $vRopsMetricURL -Body $DRSVMRuleMetricXML -Credential $vRopsCred -ContentType "application/xml;charset=utf-8"
+
+    Remove-Variable vRopsMetricURL -ErrorAction SilentlyContinue
+    Remove-Variable DRSVMRuleMetricXML -ErrorAction SilentlyContinue
+    Remove-Variable MetricInsert -ErrorAction SilentlyContinue
+}
+
+
+
+
+#Push in DRSVMRule Metrics
+
+$DRSClusterGroupMetricXML = @()
+
+ForEach($DRSClusterGroupMetric in $DRSClusterGroupReport){ 
+
+   $DRSClusterGroupMetricXML = @('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                    <ops:stat-contents xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ops="http://webservice.vmware.com/vRealizeOpsMgr/1.0/">')
+
+        ForEach ($DRSClusterGroupMetricInsert in $DRSClusterGroupMetric.group){
+
+            $DRSClusterGroupMetricXML += @('<ops:stat-content statKey="VMAN|DRS|GROUPS|{2}|{1}|">
+                                                  <ops:timestamps>{0}</ops:timestamps>
+                                                  <ops:data>{3}</ops:data>
+                                                  <ops:unit>%</ops:unit>
+                                                </ops:stat-content>' -f $NowDateEpoc,
+                                                                     $DRSClusterGroupMetricInsert.'Name',
+                                                                     $DRSClusterGroupMetricInsert.'Grouptype',
+                                                                     $DRSClusterGroupMetricInsert.'Count')
+            }
+
+
+    $DRSClusterGroupMetricXML += @('</ops:stat-contents>')
+
+    [xml]$DRSClusterGroupMetricXML = $DRSClusterGroupMetricXML
+
+    $DRSClusterGroupMetricName = $DRSClusterGroupMetric.Name
+
+    $vRopsMetricURL = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+$resourceLookup.resourceId+'/stats'
+
+    Write-Host "Pushing DRSClusterGroup Metrics for cluster $DRSClusterGroupMetricName to $vRopsMetricURL"
+    Log -Message "Pushing DRSClusterGroup Metrics for cluster $DRSClusterGroupMetricName to $vRopsMetricURL" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+
+    Invoke-RestMethod -Method POST -uri $vRopsMetricURL -Body $DRSClusterGroupMetricXML -Credential $vRopsCred -ContentType "application/xml;charset=utf-8"
+
+    Remove-Variable vRopsMetricURL -ErrorAction SilentlyContinue
+    Remove-Variable DRSClusterGroupMetricXML -ErrorAction SilentlyContinue
+    Remove-Variable MetricInsert -ErrorAction SilentlyContinue
+}
+
+
+
+#Push in DRSVM2HOST Metrics
+
+$DRSVM2HOSTRuleMetricXML = @()
+
+ForEach($DRSVM2HOSTRuleMetric in $DRSClusterGroupReport){ 
+
+        ForEach ($DRSVM2HOSTRuleMetricInsert in $DRSVM2HOSTRuleReport.group){
+
+            $DRSVM2HOSTRuleMetricXML += @('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <ops:stat-contents xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ops="http://webservice.vmware.com/vRealizeOpsMgr/1.0/">
+                    <ops:stat-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|VMGROUPMEMBERSCOUNT">
+                      <ops:timestamps>{0}</ops:timestamps>
+                      <ops:data>{2}</ops:data>
+                      <ops:unit>%</ops:unit>
+                    </ops:stat-content>
+                    <ops:stat-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|HOSTGROUPMEMBERSCOUNT">
+                      <ops:timestamps>{0}</ops:timestamps>
+                        <ops:data>{3}</ops:data>
+                        <ops:unit>%</ops:unit>
+                    </ops:stat-content>
+                </ops:stat-contents>' -f $NowDateEpoc,
+                                         $DRSVM2HOSTRuleMetricInsert.'Name',
+                                         $DRSVM2HOSTRuleMetricInsert.'VMHostGroupMembersCount',
+                                         $DRSVM2HOSTRuleMetricInsert.'VMGroupMembersCount')
+                }
+
+
+    $DRSVM2HOSTRuleMetricName = $DRSVM2HOSTRuleMetric.Name
+
+    $vRopsMetricURL = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+$resourceLookup.resourceId+'/stats'
+
+    Write-Host "Pushing DRSVM2HOSTRule Metrics for cluster $DRSVM2HOSTRuleMetricName to $vRopsMetricURL"
+    Log -Message "Pushing DRSVM2HOSTRule Metrics for cluster $DRSVM2HOSTRuleMetricName to $vRopsMetricURL" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+
+    Invoke-RestMethod -Method POST -uri $vRopsMetricURL -Body $DRSVM2HOSTRuleMetricXML -Credential $vRopsCred -ContentType "application/xml;charset=utf-8"
+
+    Remove-Variable vRopsMetricURL -ErrorAction SilentlyContinue
+    Remove-Variable DRSVM2HOSTRuleMetricXML -ErrorAction SilentlyContinue
+    Remove-Variable MetricInsert -ErrorAction SilentlyContinue
+    }
+
+Write-Host "Done Importing Custom DRS properties Clusters into vROPS"
+Log -Message "Done Importing Custom DRS properties Clusters into vROPS" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
 
             }
     Diff {
