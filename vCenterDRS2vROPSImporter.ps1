@@ -2,22 +2,66 @@
 #v1.0 vMan.ch, 15.11.2019 - Initial Version
 #v1.1 vMan.ch, 18.03.2020 - Added logging, moved a loop, defined strings.
 #v1.2 vMan.ch, 19.03.2020 - Added Member counts as a new metric.
+#v1.3 vMan.ch, 20.10.2022 - Switch to token based auth and fixed DRSVM2HOSTRule
 
-<#
-    Run the command below to store user and pass in secure credential XML for each environment
-
-        $cred = Get-Credential
-        $cred | Export-Clixml -Path "vROPS.xml"
-#>
+# Example Usage
+# .\vCenterDRS2vROPSImporter.ps1 -vCenter 'vcsa.vman.ch' -vCenterUser 'administrator@vman.ch' -vCenterPassword 'P@ssw0rd123!' -vRopsAddress 'vropsa01.vman.ch' -vRopsUser 'admin' -vRopsPassword 'P@ssw0rd123!' -ImportType 'Full'
 
 param
 (
-  [Array]$vCenter,
-  [String]$creds,
-  [String]$vRopsAddress,
-  [String]$vRopsCreds,
-  [String]$ImportType
+[Array]$vCenter,
+[String]$vCenterUser,
+[String]$vCenterPassword,
+[String]$vRopsAddress,
+[String]$vRopsUser,
+[String]$vRopsPassword,
+[String]$ImportType
 )
+
+#OtherVars
+$vCenterCred = New-Object System.Management.Automation.PSCredential -ArgumentList $vCenterUser, $(ConvertTo-SecureString $vCenterPassword -AsPlainText -Force)
+$vRopsCred = New-Object System.Management.Automation.PSCredential -ArgumentList $vRopsUser, $(ConvertTo-SecureString $vRopsPass -AsPlainText -Force)
+[DateTime]$NowDate = (Get-date)
+[int64]$NowDateEpoc = (([DateTimeOffset]$($NowDate)).ToUniversalTime().ToUnixTimeMilliseconds())
+$DRSVMRuleReport = @()
+$DRSClusterGroupReport = @()
+$DRSVM2HOSTRuleReport = @()
+$ScriptPath = "C:\VMware\vRops\DRS\"
+$RunDateTime = $NowDate.tostring("yyyyMMddHHmmss")
+$LogFileLoc = $ScriptPath + '\Log\Logfile.log'
+
+
+#Load vCenter Creds
+if($vCenterCred){
+    Write-Host "vCenter creds loaded"
+}
+else
+{
+    Write-Host "vCenter cred not selected, stop hammer time!"
+    Exit
+}
+
+#Load vRops Creds
+if($vRopsCred){
+    Write-Host "vRops creds loaded"
+}
+else
+{
+    Write-Host "vROPs cred not selected, stop hammer time!"
+    Exit
+}
+
+#Check / Create Log folder
+if (Test-Path $ScriptPath\Log) {
+    Write-Host "Folder Exists"
+    # Perform Delete file from folder operation
+}
+else
+{
+    #PowerShell Create directory if not exists
+    New-Item $ScriptPath\Log -ItemType Directory
+    Write-Host "Folder Created successfully"
+}
 
 #Logging Function
 Function Log([String]$message, [String]$LogType, [String]$LogFile){
@@ -26,9 +70,8 @@ Function Log([String]$message, [String]$LogType, [String]$LogFile){
     $message >> $LogFile
 }
 
-
 #Log rotation function
-function Reset-Log 
+Function Reset-Log 
 { 
     #function checks to see if file in question is larger than the paramater specified if it is it will roll a log and delete the oldes log if there are more than x logs. 
     param([string]$fileName, [int64]$filesize = 1mb , [int] $logcount = 5) 
@@ -101,133 +144,7 @@ function Reset-Log
         $logrollStatus = $false 
     } 
     $LogRollStatus 
-} 
-
-Function GetReport([String]$vRopsAddress, [String]$ReportResourceID, [String]$ReportID, $vRopsCreds, $Path){
- 
-Write-host 'Running Report'
- 
-#RUN Report
- 
-$ContentType = "application/xml;charset=utf-8"
-$header = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
-$header.Add("Accept", 'application/xml')
- 
-$RunReporturl = 'https://'+$vRopsAddress+'/suite-api/api/reports'
- 
-$Body = @"
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<ops:report xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ops="http://webservice.vmware.com/vRealizeOpsMgr/1.0/">
-    <ops:resourceId>$ReportResourceID</ops:resourceId>
-    <ops:reportDefinitionId>$ReportID</ops:reportDefinitionId>
-</ops:report>
-"@
- 
- 
-[xml]$Data = Invoke-RestMethod -Method POST -uri $RunReporturl -Credential $vRopsCreds -ContentType $ContentType -Headers $header -Body $body
- 
-$ReportLink = $Data.report.links.link | Where name -eq 'linkToSelf' | Select 'href'	
- 
-$ReportLinkurl = 'https://' + $vRopsAddress + $ReportLink.href
- 
-#Check if report is run to download
- 
-[xml]$ReportStatus = Invoke-RestMethod -Method GET -uri $ReportLinkurl -Credential $vRopsCreds -ContentType $ContentType -Headers $header
- 
- 
-While ($ReportStatus.report.status -ne "COMPLETED") {
-    [xml]$ReportStatus = Invoke-RestMethod -Method GET -uri $ReportLinkurl -Credential $vRopsCreds -ContentType $ContentType -Headers $header
-    Write-host 'Waiting for report to finish running, current status: '  $ReportStatus.report.status
-    Sleep 3
-      } # End of block statement
- 
- 
-$ReportDownload = $ReportLinkurl + '/download?format=CSV'
- 
-Invoke-RestMethod -Method GET -uri $ReportDownload -Credential $vRopsCreds -ContentType $ContentType -Headers $header -OutFile $Path
- 
- 
-return $Path
 }
-
-#Lookup Function to get resourceId from VM Name
-Function GetObject([String]$vRopsObjName, [String]$resourceKindKey, [String]$vRopsServer, $vRopsCredentials){
-
-    $vRopsObjName = $vRopsObjName -replace ' ','%20'
-
-    [xml]$Checker = Invoke-RestMethod -Method Get -Uri "https://$vRopsServer/suite-api/api/resources?resourceKind=$resourceKindKey&name=$vRopsObjName" -Credential $vRopsCredentials -Headers $header -ContentType $ContentType
-
-#Check if we get 0
-
-    if ([Int]$Checker.resources.pageInfo.totalCount -eq '0'){
-
-    Return $CheckerOutput = ''
-
-    }
-
-    else {
-
-        # Check if we get more than 1 result and apply some logic
-            If ([Int]$Checker.resources.pageInfo.totalCount -gt '1') {
-
-                $DataReceivingCount = $Checker.resources.resource.resourceStatusStates.resourceStatusState.resourceStatus -eq 'DATA_RECEIVING'
-
-                    If ($DataReceivingCount.count -gt 1){
-
-                     If ($Checker.resources.resource.ResourceKey.name -eq $vRopsObjName){
-
-                        ForEach ($Result in $Checker.resources.resource){
-
-                            IF ($Result.resourceStatusStates.resourceStatusState.resourceStatus -eq 'DATA_RECEIVING'){
-
-                            $CheckerOutput = New-Object PsObject -Property @{Name=$vRopsObjName; resourceId=$Result.identifier; resourceKindKey=$Result.resourceKey.resourceKindKey}
-
-                            Return $CheckerOutput
-                    
-                            }   
-                        }
-
-                      }
-                    }
-            
-                    Else 
-                    {
-
-                    ForEach ($Result in $Checker.resources.resource){
-
-                        IF ($Result.resourceStatusStates.resourceStatusState.resourceStatus -eq 'DATA_RECEIVING'){
-
-                            $CheckerOutput = New-Object PsObject -Property @{Name=$vRopsObjName; resourceId=$Result.identifier; resourceKindKey=$Result.resourceKey.resourceKindKey}
-
-                            Return $CheckerOutput
-                    
-                        }   
-                    }
-            }  
-         }
-
-        else {
-    
-            $CheckerOutput = New-Object PsObject -Property @{Name=$vRopsObjName; resourceId=$Checker.resources.resource.identifier; resourceKindKey=$Checker.resources.resource.resourceKey.resourceKindKey}
-
-            Return $CheckerOutput
-
-            }
-        }
-}
-
-$ScriptPath = (Get-Item -Path ".\" -Verbose).FullName
-$random = get-random
-$RunDateTime = (Get-date)
-$RunDateTime = $RunDateTime.tostring("yyyyMMddHHmmss")
-$RunDateTime = $RunDateTime + '_'  + $random
-$LogFileLoc = $ScriptPath + '\Log\Logfile.log'
-[DateTime]$NowDate = (Get-date)
-[int64]$NowDateEpoc = (([DateTimeOffset](Get-Date)).ToUniversalTime().ToUnixTimeMilliseconds())
-
-#cleanupLogFile
-$LogFileLoc = $ScriptPath + '\Log\Logfile.log'
-Reset-Log -fileName $LogFileLoc -filesize 10mb -logcount 5
 
 #Take all certs.
 add-type @"
@@ -244,40 +161,136 @@ add-type @"
 [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-if($creds -gt ""){
-
-    $cred = Import-Clixml -Path "$ScriptPath\config\$creds.xml"
-
+Function New-vRopsToken {
+    [CmdletBinding()]param(
+        [PSCredential]$credentialFile,
+        [string]$vROPSServer
+    )
+                                
+    if ($vROPSServer -eq $null -or $vROPSServer -eq '') {
+        $vROPSServer = ""
     }
+
+    $vROPSUser = $credentialFile.UserName
+    $vROPSPassword = $credentialFile.GetNetworkCredential().Password
+
+    if ("TrustAllCertsPolicy" -as [type]) {} else {
+    add-type @"
+        using System.Net;
+        using System.Security.Cryptography.X509Certificates;
+        public class TrustAllCertsPolicy : ICertificatePolicy {
+            public bool CheckValidationResult(
+                ServicePoint srvPoint, X509Certificate certificate,
+                WebRequest request, int certificateProblem) {
+                return true;
+            }
+        }
+"@ 
+[System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
+    }
+
+    $BaseURL = "https://" + $vROPsServer + "/suite-api/api/"
+    $BaseAuthURL = "https://" + $vROPsServer + "/suite-api/api/auth/token/acquire"
+    $Type = "application/json"
+
+    $AuthJSON =
+    "{
+    ""username"": ""$vROPSUser"",
+    ""password"": ""$vROPsPassword""
+    }"
+
+    Try { $vROPSSessionResponse = Invoke-RestMethod -Method POST -Uri $BaseAuthURL -Body $AuthJSON -ContentType $Type }
+    Catch {
+        $_.Exception.ToString()
+        $error[0] | Format-List -Force
+    }
+
+    $vROPSSessionHeader = @{"Authorization"="vRealizeOpsToken "+$vROPSSessionResponse.'auth-token'.token 
+    "Accept"="application/xml"}
+    $vROPSSessionHeader.add("X-vRealizeOps-API-use-unsupported","true")
+    return $vROPSSessionHeader
+}
+
+Function GetObject([String]$vRopsObjName, [String]$resourceKindKey, [String]$vRopsServer, $vRopsToken){
+
+$vRopsObjName = $vRopsObjName -replace ' ','%20'
+
+[xml]$Checker = Invoke-RestMethod -Method GET -Uri "https://$vRopsServer/suite-api/api/resources?resourceKind=$resourceKindKey&name=$vRopsObjName" -ContentType "application/xml" -Headers $vRopsToken
+
+# Check if we get more than 1 result and apply some logic
+    If ([Int]$Checker.resources.pageInfo.totalCount -gt '1') {
+
+        $DataReceivingCount = $Checker.resources.resource.resourceStatusStates.resourceStatusState.resourceStatus -eq 'DATA_RECEIVING'
+
+            If ($DataReceivingCount.count -gt 1){
+
+            If ($Checker.resources.resource.ResourceKey.name -eq $vRopsObjName){
+
+                ForEach ($Result in $Checker.resources.resource){
+
+                    IF ($Result.resourceStatusStates.resourceStatusState.resourceStatus -eq 'DATA_RECEIVING'){
+
+
+
+                    $CheckerOutput = New-Object PsObject -Property @{Name=$vRopsObjName; resourceId=$Result.identifier; resourceKindKey=$Result.resourceKey.resourceKindKey} 
+
+                    Return $CheckerOutput
+    
+                    }   
+                }
+
+            }
+            }
+                                        
+            Else 
+            {
+
+            ForEach ($Result in $Checker.resources.resource){
+
+                IF ($Result.resourceStatusStates.resourceStatusState.resourceStatus -eq 'DATA_RECEIVING'){
+
+                    $CheckerOutput = New-Object PsObject -Property @{Name=$vRopsObjName; resourceId=$Result.identifier; resourceKindKey=$Result.resourceKey.resourceKindKeY}
+
+                    Return $CheckerOutput
+    
+                }   
+            }
+    }  
+}
     else
     {
-    echo "Environment not selected, stop hammer time!"
-    Exit
-    }
+                                
+    IF ($Checker.resources.resource.ResourceKey.name -eq $vRopsObjName ) {
 
-if($vRopsCreds -gt ""){
-
-    $vRopsCred = Import-Clixml -Path "$ScriptPath\config\$vRopsCreds.xml"
+        $CheckerOutput = New-Object PsObject -Property @{Name=$vRopsObjName; resourceId=$Checker.resources.resource.identifier; resourceKindKey=$Checker.resources.resource.resourceKey.resourceKindKey}
 
     }
-    else
-    {
-    echo "Environment not selected, stop hammer time!"
-    Exit
-    }
 
+    Return $CheckerOutput
+
+    }
+}
+
+
+#cleanupLogFile
+Reset-Log -fileName $LogFileLoc -filesize 10mb -logcount 5
+
+Write-Host "Starting Script"
 Log -Message "Starting Script" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
 
-$DRSVMRuleReport = @()
-$DRSClusterGroupReport = @()
-$DRSVM2HOSTRuleReport = @()
+Write-Host "Generating vRops Token for $($vRopsCred.UserName)"
+Log -Message "Generating vRops Token for $($vRopsCred.UserName)" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+
+#Generate Token
+$vRopsAdminToken = New-vRopsToken $vRopsCred $vRopsAddress
 
 ForEach ($VC in $vCenter){
 
 
+Write-Host "Connecting to $VC with credentials $($vCenterCred.UserName)"
 Log -Message "Connecting to $VC with credentials $creds" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
 
-Connect-VIServer -server $VC -Credential $cred -Force 
+Connect-VIServer -server $VC -Credential $vCenterCred -Force 
 
 Write-Host "Running Get-DrsRule against $VC"
 Log -Message "Running Get-DrsRule against $VC" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
@@ -322,7 +335,7 @@ Log -Message "Running Get-DrsClusterGroup against $VC" -LogType "JOB-$RunDateTim
     $DRSClusterGroupReport | ForEach-Object -Begin {
         $GroupLookup = @{}
     } -Process {
-         $GroupLookup.add($_.Cluster + $_.Name +$_.Grouptype,$_.Member+'$'+$_.Count)
+        $GroupLookup.add($_.Cluster + $_.Name +$_.Grouptype,$_.Member+'$'+$_.Count)
     }
 
 
@@ -375,7 +388,7 @@ switch($ImportType)
 ########################
 
             Write-Host "Create XML's, lookup resourceId and pushing Custom DRS Properties to vRops for Clusters"
-            Log -Message "Create XML's, lookup resourceId and pushing Custom DRS Properties to vRops for Clusters" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+			Log -Message "Create XML's, lookup resourceId and pushing Custom DRS Properties to vRops for Clusters" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
 
             ########################
             ##DRS VM RULES Section##
@@ -385,7 +398,7 @@ switch($ImportType)
 
             #Create XML for DRS Rules, lookup resourceId and push Data to vRops
 
-            ForEach($ClusterRules in $DRSVMRuleReport){ 
+            ForEach($ClusterRules in $DRSVMRuleReport){
 
             #Create XML Structure and populate variables from the Metadata file for DRS Rules
 
@@ -395,21 +408,21 @@ switch($ImportType)
                             ForEach($DRSRule in $ClusterRules.group){
 
                                 $XMLDRSRuleFile += @('<ops:property-content statKey="VMAN|DRS|RULES|VM|{1}|TYPE">
-                                                        <ops:timestamps>{0}</ops:timestamps>
-                                                        <ops:values><![CDATA[{2}]]></ops:values>
-                                                    </ops:property-content>
-                                                    <ops:property-content statKey="VMAN|DRS|RULES|VM|{1}|VMs">
-                                                        <ops:timestamps>{0}</ops:timestamps>
-                                                        <ops:values><![CDATA[{3}]]></ops:values>
-                                                    </ops:property-content>
-                                                    <ops:property-content statKey="VMAN|DRS|RULES|VM|{1}|ENABLED">
-                                                        <ops:timestamps>{0}</ops:timestamps>
-                                                        <ops:values><![CDATA[{4}]]></ops:values>
-                                                    </ops:property-content>') -f $NowDateEpoc,
-                                                                         $DRSRule.'Name',
-                                                                         $DRSRule.'Type',
-                                                                         [String]$DRSRule.'VMs',
-                                                                         $DRSRule.'Enabled'
+            <ops:timestamps>{0}</ops:timestamps>
+            <ops:values><![CDATA[{2}]]></ops:values>
+        </ops:property-content>
+        <ops:property-content statKey="VMAN|DRS|RULES|VM|{1}|VMs">
+            <ops:timestamps>{0}</ops:timestamps>
+            <ops:values><![CDATA[{3}]]></ops:values>
+        </ops:property-content>
+        <ops:property-content statKey="VMAN|DRS|RULES|VM|{1}|ENABLED">
+            <ops:timestamps>{0}</ops:timestamps>
+            <ops:values><![CDATA[{4}]]></ops:values>
+        </ops:property-content>') -f $NowDateEpoc,
+                            $DRSRule.'Name',
+                            $DRSRule.'Type',
+                            [String]$DRSRule.'VMs',
+                            $DRSRule.'Enabled'
             }
 
 
@@ -417,26 +430,26 @@ switch($ImportType)
 
             [xml]$xmlSend = $XMLDRSRuleFile
 
-            ##Debug Baby
-            
+            #ExportConfig
+                        
             $ClusterRulesName = $ClusterRules.'Name'
 
-            ##$output = $ScriptPath + '\XML\' + $ClusterRulesName' + '_RULES.xml'
-
+            #Debug
+            ##$output = $ScriptPath + '\' + $RunDateTime + '\' + $ClusterRulesName + '_RULES.xml'
             ##[xml]$xmlSend.Save($output)
 
             #Run the function to get the resourceId from the VM Name
-            $resourceLookup = GetObject $ClusterRulesName 'ClusterComputeResource' $vRopsAddress $vRopsCred
+            $resourceIDLookup = (GetObject $ClusterRulesName 'ClusterComputeResource' $vRopsAddress $vRopsAdminToken).Resourceid
 
             #Create URL string for Invoke-RestMethod
-            $urlsend = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+ $resourceLookup.resourceId + '/properties'
+            $urlsend = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+ $resourceIDLookup + '/properties'
 
             Write-Host "Pushing DRS Rule Properties to $ClusterRulesName to $urlsend"
-            Log -Message "Pushing DRS Rule Properties to $ClusterRulesName to $urlsend" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+			Log -Message "Pushing DRS Rule Properties to $ClusterRulesName to $urlsend" -LogType "JOB-$RunDateTime" -LogFile $LogFileLo
 
             #Send Attribute data to vRops.
             $ContentType = "application/xml;charset=utf-8"
-            Invoke-RestMethod -Method POST -uri $urlsend -Body $xmlSend -Credential $vRopsCred -ContentType $ContentType
+            Invoke-RestMethod -Method POST -uri $urlsend -Body $xmlSend -ContentType $ContentType -Headers $vRopsAdminToken
 
             #CleanUp Variables to make sure we dont update the next object with the same data as the previous one.
             Remove-Variable urlsend -ErrorAction SilentlyContinue
@@ -464,12 +477,12 @@ switch($ImportType)
                             ForEach($DRSGroup in $ClusterGroup.group){
 
                                 $XMLDRSGroupFile += @('<ops:property-content statKey="VMAN|DRS|GROUPS|{2}|{1}|MEMBERS">
-                                                        <ops:timestamps>{0}</ops:timestamps>
-                                                        <ops:values><![CDATA[{3}]]></ops:values>
-                                                    </ops:property-content>') -f $NowDateEpoc,
-                                                                         $DRSGroup.'Name',
-                                                                         $DRSGroup.'Grouptype',
-                                                                         [String]$DRSGroup.'Member'
+            <ops:timestamps>{0}</ops:timestamps>
+            <ops:values><![CDATA[{3}]]></ops:values>
+        </ops:property-content>') -f $NowDateEpoc,
+                            $DRSGroup.'Name',
+                            $DRSGroup.'Grouptype',
+                            [String]$DRSGroup.'Member'
             }
 
 
@@ -477,26 +490,26 @@ switch($ImportType)
 
             [xml]$xmlSend = $XMLDRSGroupFile
 
-            ##Debug Baby
-            
+            #ExportConfig
+                        
             $ClusterGroupName = $ClusterGroup.'Name'
 
-            #$output = $ScriptPath + '\XML\' + $ClusterGroupName + '_GROUPS.xml'
-
-            #[xml]$xmlSend.Save($output)
+            #Debug
+            ##$output = $ScriptPath + '\' + $RunDateTime + '\' + $ClusterGroupName + '_GROUPS.xml'
+            ##[xml]$xmlSend.Save($output)
 
             #Run the function to get the resourceId from the VM Name
-            $resourceLookup = GetObject $ClusterGroupName 'ClusterComputeResource' $vRopsAddress $vRopsCred
+            $resourceIDLookup = (GetObject $ClusterGroupName 'ClusterComputeResource' $vRopsAddress $vRopsAdminToken).Resourceid
 
             #Create URL string for Invoke-RestMethod
-            $urlsend = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+ $resourceLookup.resourceId + '/properties'
+            $urlsend = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+ $resourceIDLookup + '/properties'
 
             Write-Host "Pushing DRS Group Properties to $ClusterGroupName to $urlsend"
-            Log -Message "Pushing DRS Group Properties to $ClusterGroupName to $urlsend" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+			Log -Message "Pushing DRS Group Properties to $ClusterGroupName to $urlsend" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
 
             #Send Attribute data to vRops.
             $ContentType = "application/xml;charset=utf-8"
-            Invoke-RestMethod -Method POST -uri $urlsend -Body $xmlSend -Credential $vRopsCred -ContentType $ContentType
+            Invoke-RestMethod -Method POST -uri $urlsend -Body $xmlSend -ContentType $ContentType -Headers $vRopsAdminToken
 
             #CleanUp Variables to make sure we dont update the next object with the same data as the previous one.
             Remove-Variable urlsend -ErrorAction SilentlyContinue
@@ -505,7 +518,6 @@ switch($ImportType)
             Remove-Variable ClusterGroup -ErrorAction SilentlyContinue
             Remove-Variable ClusterGroupName -ErrorAction SilentlyContinue
             }
-
 
             ########################
             ##DRS VM 2 HOST RULES ##
@@ -525,36 +537,36 @@ switch($ImportType)
                             ForEach($DRSVM2HOSTRule in $ClusterVM2HOSTRules.group){
 
                                 $XMLDRSVM2HOSTRuleFile += @('<ops:property-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|TYPE">
-                                                        <ops:timestamps>{0}</ops:timestamps>
-                                                        <ops:values><![CDATA[{2}]]></ops:values>
-                                                    </ops:property-content>
-                                                    <ops:property-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|HOSTGROUP">
-                                                        <ops:timestamps>{0}</ops:timestamps>
-                                                        <ops:values><![CDATA[{3}]]></ops:values>
-                                                    </ops:property-content>
-                                                    <ops:property-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|HOSTGROUPMEMBERS">
-                                                        <ops:timestamps>{0}</ops:timestamps>
-                                                        <ops:values><![CDATA[{4}]]></ops:values>
-                                                    </ops:property-content>
-                                                    <ops:property-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|VMGROUP">
-                                                        <ops:timestamps>{0}</ops:timestamps>
-                                                        <ops:values><![CDATA[{5}]]></ops:values>
-                                                    </ops:property-content>
-                                                    <ops:property-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|VMGROUPMEMBERS">
-                                                        <ops:timestamps>{0}</ops:timestamps>
-                                                        <ops:values><![CDATA[{6}]]></ops:values>
-                                                    </ops:property-content>
-                                                    <ops:property-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|ENABLED">
-                                                        <ops:timestamps>{0}</ops:timestamps>
-                                                        <ops:values><![CDATA[{7}]]></ops:values>
-                                                    </ops:property-content>') -f $NowDateEpoc,
-                                                                         $DRSVM2HOSTRule.'Name',
-                                                                         $DRSVM2HOSTRule.'Type',
-                                                                         $DRSVM2HOSTRule.'VMHostGroup',
-                                                                         $DRSVM2HOSTRule.'VMHostGroupMembers',
-                                                                         $DRSVM2HOSTRule.'VMGroup',
-                                                                         $DRSVM2HOSTRule.'VMGroupMembers',
-                                                                         $DRSVM2HOSTRule.'Enabled'
+            <ops:timestamps>{0}</ops:timestamps>
+            <ops:values><![CDATA[{2}]]></ops:values>
+        </ops:property-content>
+        <ops:property-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|HOSTGROUP">
+            <ops:timestamps>{0}</ops:timestamps>
+            <ops:values><![CDATA[{3}]]></ops:values>
+        </ops:property-content>
+        <ops:property-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|HOSTGROUPMEMBERS">
+            <ops:timestamps>{0}</ops:timestamps>
+            <ops:values><![CDATA[{4}]]></ops:values>
+        </ops:property-content>
+        <ops:property-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|VMGROUP">
+            <ops:timestamps>{0}</ops:timestamps>
+            <ops:values><![CDATA[{5}]]></ops:values>
+        </ops:property-content>
+        <ops:property-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|VMGROUPMEMBERS">
+            <ops:timestamps>{0}</ops:timestamps>
+            <ops:values><![CDATA[{6}]]></ops:values>
+        </ops:property-content>
+        <ops:property-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|ENABLED">
+            <ops:timestamps>{0}</ops:timestamps>
+            <ops:values><![CDATA[{7}]]></ops:values>
+        </ops:property-content>') -f $NowDateEpoc,
+                            $DRSVM2HOSTRule.'Name',
+                            $DRSVM2HOSTRule.'Type',
+                            $DRSVM2HOSTRule.'VMHostGroup',
+                            $DRSVM2HOSTRule.'VMHostGroupMembers',
+                            $DRSVM2HOSTRule.'VMGroup',
+                            $DRSVM2HOSTRule.'VMGroupMembers',
+                            $DRSVM2HOSTRule.'Enabled'
             }
 
 
@@ -562,26 +574,26 @@ switch($ImportType)
 
             [xml]$xmlSend = $XMLDRSVM2HOSTRuleFile 
 
-            ##Debug Baby
-            
+            #ExportConfig
+                        
             $ClusterVM2HOSTRulesName = $ClusterVM2HOSTRules.Name 
 
-            ##$output = $ScriptPath + '\XML\' + $ClusterVM2HOSTRulesName + '_DRSVM2HOSTRULES.xml'
-
+            #Debug
+            ##$output = $ScriptPath + '\' + $RunDateTime + '\' + $ClusterVM2HOSTRulesName + '_DRSVM2HOSTRULES.xml'
             ##[xml]$xmlSend.Save($output)
 
             #Run the function to get the resourceId from the VM Name
-            $resourceLookup = GetObject $ClusterVM2HOSTRulesName 'ClusterComputeResource' $vRopsAddress $vRopsCred
+            $resourceIDLookup = (GetObject $ClusterVM2HOSTRulesName 'ClusterComputeResource' $vRopsAddress $vRopsAdminToken).Resourceid
 
             #Create URL string for Invoke-RestMethod
-            $urlsend = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+ $resourceLookup.resourceId + '/properties'
+            $urlsend = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+ $resourceIDLookup + '/properties'
 
             Write-Host "Pushing DRS VM2HOST Rule Properties to $ClusterVM2HOSTRulesName to $urlsend"
-            Log -Message "Pushing DRS VM2HOST Properties to $ClusterVM2HOSTRulesName to $urlsend" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+			Log -Message "Pushing DRS VM2HOST Properties to $ClusterVM2HOSTRulesName to $urlsend" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
 
             #Send Attribute data to vRops.
             $ContentType = "application/xml;charset=utf-8"
-            Invoke-RestMethod -Method POST -uri $urlsend -Body $xmlSend -Credential $vRopsCred -ContentType $ContentType
+            Invoke-RestMethod -Method POST -uri $urlsend -Body $xmlSend -ContentType $ContentType -Headers $vRopsAdminToken
 
             #CleanUp Variables to make sure we dont update the next object with the same data as the previous one.
             Remove-Variable urlsend -ErrorAction SilentlyContinue
@@ -597,133 +609,137 @@ switch($ImportType)
 ### Pushing Metrics ####
 ########################
 
-
 #Push in DRSVMRule Metrics
 
-$DRSVMRuleMetricXML = @()
+If ($DRSVMRuleReport){
 
-ForEach($DRSVMRuleMetric in $DRSVMRuleReport){ 
+    $DRSVMRuleMetricXML = @()
 
-
-   $DRSVMRuleMetricXML = @('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-                    <ops:stat-contents xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ops="http://webservice.vmware.com/vRealizeOpsMgr/1.0/">')
-
-        ForEach ($DRSVMRuleMetricInsert in $DRSVMRuleMetric.group){
-
-            $DRSVMRuleMetricXML += @('<ops:stat-content statKey="VMAN|DRS|RULES|VM|{1}|VMRULEMEMBERSCOUNT">
-                                            <ops:timestamps>{0}</ops:timestamps>
-                                            <ops:data>{2}</ops:data>
-                                            <ops:unit>%</ops:unit>
-                                         </ops:stat-content>' -f $NowDateEpoc,
-                                                                 $DRSVMRuleMetricInsert.'Name',
-                                                                 $DRSVMRuleMetricInsert.'Count')
-            }
+    ForEach($DRSVMRuleMetric in $DRSVMRuleReport){ 
 
 
-    $DRSVMRuleMetricXML += @('</ops:stat-contents>')
+    $DRSVMRuleMetricXML = @('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                        <ops:stat-contents xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ops="http://webservice.vmware.com/vRealizeOpsMgr/1.0/">')
 
-    [xml]$DRSVMRuleMetricXML = $DRSVMRuleMetricXML
+            ForEach ($DRSVMRuleMetricInsert in $DRSVMRuleMetric.group){
 
-    $DRSVMRuleMetricName = $DRSVMRuleMetric.Name
-
-    $vRopsMetricURL = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+$resourceLookup.resourceId+'/stats'
-
-    Write-Host "Pushing DRSVMRule Metrics for cluster $DRSVMRuleMetricName to $vRopsMetricURL"
-    Log -Message "Pushing DRSVMRule Metrics for cluster $DRSVMRuleMetricName to $vRopsMetricURL" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
-
-    Invoke-RestMethod -Method POST -uri $vRopsMetricURL -Body $DRSVMRuleMetricXML -Credential $vRopsCred -ContentType "application/xml;charset=utf-8"
-
-    Remove-Variable vRopsMetricURL -ErrorAction SilentlyContinue
-    Remove-Variable DRSVMRuleMetricXML -ErrorAction SilentlyContinue
-    Remove-Variable MetricInsert -ErrorAction SilentlyContinue
-}
-
-
-
-
-#Push in DRSVMRule Metrics
-
-$DRSClusterGroupMetricXML = @()
-
-ForEach($DRSClusterGroupMetric in $DRSClusterGroupReport){ 
-
-   $DRSClusterGroupMetricXML = @('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-                    <ops:stat-contents xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ops="http://webservice.vmware.com/vRealizeOpsMgr/1.0/">')
-
-        ForEach ($DRSClusterGroupMetricInsert in $DRSClusterGroupMetric.group){
-
-            $DRSClusterGroupMetricXML += @('<ops:stat-content statKey="VMAN|DRS|GROUPS|{2}|{1}|">
-                                                  <ops:timestamps>{0}</ops:timestamps>
-                                                  <ops:data>{3}</ops:data>
-                                                  <ops:unit>%</ops:unit>
-                                                </ops:stat-content>' -f $NowDateEpoc,
-                                                                     $DRSClusterGroupMetricInsert.'Name',
-                                                                     $DRSClusterGroupMetricInsert.'Grouptype',
-                                                                     $DRSClusterGroupMetricInsert.'Count')
-            }
-
-
-    $DRSClusterGroupMetricXML += @('</ops:stat-contents>')
-
-    [xml]$DRSClusterGroupMetricXML = $DRSClusterGroupMetricXML
-
-    $DRSClusterGroupMetricName = $DRSClusterGroupMetric.Name
-
-    $vRopsMetricURL = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+$resourceLookup.resourceId+'/stats'
-
-    Write-Host "Pushing DRSClusterGroup Metrics for cluster $DRSClusterGroupMetricName to $vRopsMetricURL"
-    Log -Message "Pushing DRSClusterGroup Metrics for cluster $DRSClusterGroupMetricName to $vRopsMetricURL" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
-
-    Invoke-RestMethod -Method POST -uri $vRopsMetricURL -Body $DRSClusterGroupMetricXML -Credential $vRopsCred -ContentType "application/xml;charset=utf-8"
-
-    Remove-Variable vRopsMetricURL -ErrorAction SilentlyContinue
-    Remove-Variable DRSClusterGroupMetricXML -ErrorAction SilentlyContinue
-    Remove-Variable MetricInsert -ErrorAction SilentlyContinue
-}
-
-
-
-#Push in DRSVM2HOST Metrics
-
-$DRSVM2HOSTRuleMetricXML = @()
-
-ForEach($DRSVM2HOSTRuleMetric in $DRSClusterGroupReport){ 
-
-        ForEach ($DRSVM2HOSTRuleMetricInsert in $DRSVM2HOSTRuleReport.group){
-
-            $DRSVM2HOSTRuleMetricXML += @('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-                <ops:stat-contents xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ops="http://webservice.vmware.com/vRealizeOpsMgr/1.0/">
-                    <ops:stat-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|VMGROUPMEMBERSCOUNT">
-                      <ops:timestamps>{0}</ops:timestamps>
-                      <ops:data>{2}</ops:data>
-                      <ops:unit>%</ops:unit>
-                    </ops:stat-content>
-                    <ops:stat-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|HOSTGROUPMEMBERSCOUNT">
-                      <ops:timestamps>{0}</ops:timestamps>
-                        <ops:data>{3}</ops:data>
-                        <ops:unit>%</ops:unit>
-                    </ops:stat-content>
-                </ops:stat-contents>' -f $NowDateEpoc,
-                                         $DRSVM2HOSTRuleMetricInsert.'Name',
-                                         $DRSVM2HOSTRuleMetricInsert.'VMHostGroupMembersCount',
-                                         $DRSVM2HOSTRuleMetricInsert.'VMGroupMembersCount')
+                $DRSVMRuleMetricXML += @('<ops:stat-content statKey="VMAN|DRS|RULES|VM|{1}|VMRULEMEMBERSCOUNT">
+    <ops:timestamps>{0}</ops:timestamps>
+    <ops:data>{2}</ops:data>
+    <ops:unit>%</ops:unit>
+</ops:stat-content>' -f $NowDateEpoc,
+                        $DRSVMRuleMetricInsert.'Name',
+                        $DRSVMRuleMetricInsert.'Count')
                 }
 
 
-    $DRSVM2HOSTRuleMetricName = $DRSVM2HOSTRuleMetric.Name
+        $DRSVMRuleMetricXML += @('</ops:stat-contents>')
 
-    $vRopsMetricURL = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+$resourceLookup.resourceId+'/stats'
+        [xml]$DRSVMRuleMetricXML = $DRSVMRuleMetricXML
 
-    Write-Host "Pushing DRSVM2HOSTRule Metrics for cluster $DRSVM2HOSTRuleMetricName to $vRopsMetricURL"
-    Log -Message "Pushing DRSVM2HOSTRule Metrics for cluster $DRSVM2HOSTRuleMetricName to $vRopsMetricURL" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+        $DRSVMRuleMetricName = $DRSVMRuleMetric.Name
 
-    Invoke-RestMethod -Method POST -uri $vRopsMetricURL -Body $DRSVM2HOSTRuleMetricXML -Credential $vRopsCred -ContentType "application/xml;charset=utf-8"
+        $vRopsMetricURL = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+$resourceIDLookup+'/stats'
 
-    Remove-Variable vRopsMetricURL -ErrorAction SilentlyContinue
-    Remove-Variable DRSVM2HOSTRuleMetricXML -ErrorAction SilentlyContinue
-    Remove-Variable MetricInsert -ErrorAction SilentlyContinue
+        Write-Host "Pushing DRSVMRule Metrics for cluster $DRSVMRuleMetricName to $vRopsMetricURL"
+		Log -Message "Pushing DRSVMRule Metrics for cluster $DRSVMRuleMetricName to $vRopsMetricURL" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+
+        Invoke-RestMethod -Method POST -uri $vRopsMetricURL -Body $DRSVMRuleMetricXML -ContentType "application/xml;charset=utf-8" -Headers $vRopsAdminToken
+
+        Remove-Variable vRopsMetricURL -ErrorAction SilentlyContinue
+        Remove-Variable DRSVMRuleMetricXML -ErrorAction SilentlyContinue
+        Remove-Variable MetricInsert -ErrorAction SilentlyContinue
     }
 
+}
+
+#Push in DRSClusterGroup Metrics
+
+If ($DRSClusterGroupReport){
+
+    $DRSClusterGroupMetricXML = @()
+
+    ForEach($DRSClusterGroupMetric in $DRSClusterGroupReport){ 
+
+    $DRSClusterGroupMetricXML = @('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                        <ops:stat-contents xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ops="http://webservice.vmware.com/vRealizeOpsMgr/1.0/">')
+
+            ForEach ($DRSClusterGroupMetricInsert in $DRSClusterGroupMetric.group){
+
+                $DRSClusterGroupMetricXML += @('<ops:stat-content statKey="VMAN|DRS|GROUPS|{2}|{1}|">
+        <ops:timestamps>{0}</ops:timestamps>
+        <ops:data>{3}</ops:data>
+        <ops:unit>%</ops:unit>
+        </ops:stat-content>' -f $NowDateEpoc,
+                            $DRSClusterGroupMetricInsert.'Name',
+                            $DRSClusterGroupMetricInsert.'Grouptype',
+                            $DRSClusterGroupMetricInsert.'Count')
+                }
+
+
+        $DRSClusterGroupMetricXML += @('</ops:stat-contents>')
+
+        [xml]$DRSClusterGroupMetricXML = $DRSClusterGroupMetricXML
+
+        $DRSClusterGroupMetricName = $DRSClusterGroupMetric.Name
+
+        $vRopsMetricURL = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+$resourceIDLookup+'/stats'
+
+        Write-Host "Pushing DRSClusterGroup Metrics for cluster $DRSClusterGroupMetricName to $vRopsMetricURL"
+		Log -Message "Pushing DRSClusterGroup Metrics for cluster $DRSClusterGroupMetricName to $vRopsMetricURL" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
+
+        Invoke-RestMethod -Method POST -uri $vRopsMetricURL -Body $DRSClusterGroupMetricXML -ContentType "application/xml;charset=utf-8" -Headers $vRopsAdminToken
+
+        Remove-Variable vRopsMetricURL -ErrorAction SilentlyContinue
+        Remove-Variable DRSClusterGroupMetricXML -ErrorAction SilentlyContinue
+        Remove-Variable MetricInsert -ErrorAction SilentlyContinue
+    }
+
+}
+#Push in DRSVM2HOSTRule Metrics
+
+if ($DRSClusterGroupReport){
+
+    $DRSVM2HOSTRuleMetricXML = @()
+
+    ForEach($DRSVM2HOSTRuleMetric in $DRSClusterGroupReport){ 
+
+    $DRSVM2HOSTRuleMetricXML = @('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                        <ops:stat-contents xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ops="http://webservice.vmware.com/vRealizeOpsMgr/1.0/">')
+
+            ForEach ($DRSVM2HOSTRuleMetricInsert in $DRSVM2HOSTRuleReport.group){
+
+                $DRSVM2HOSTRuleMetricXML += @('<ops:stat-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|VMGROUPMEMBERSCOUNT">
+    <ops:timestamps>{0}</ops:timestamps>
+    <ops:data>{2}</ops:data>
+    <ops:unit>%</ops:unit>
+    </ops:stat-content>
+    <ops:stat-content statKey="VMAN|DRS|RULES|VM2HOST|{1}|HOSTGROUPMEMBERSCOUNT">
+    <ops:timestamps>{0}</ops:timestamps>
+        <ops:data>{3}</ops:data>
+        <ops:unit>%</ops:unit>
+    </ops:stat-content>' -f $NowDateEpoc,
+                        $DRSVM2HOSTRuleMetricInsert.'Name',
+                        $DRSVM2HOSTRuleMetricInsert.'VMHostGroupMembersCount',
+                        $DRSVM2HOSTRuleMetricInsert.'VMGroupMembersCount')
+                    }
+                    
+        $DRSVM2HOSTRuleMetricXML += @('</ops:stat-contents>')
+
+        $DRSVM2HOSTRuleMetricName = $DRSVM2HOSTRuleMetric.Name
+
+        $vRopsMetricURL = 'https://' + $vRopsAddress + '/suite-api/api/resources/'+$resourceIDLookup+'/stats'
+
+        Write-Host "Pushing DRSVM2HOSTRule Metrics for cluster $DRSVM2HOSTRuleMetricName to $vRopsMetricURL"
+		Log -Message "Pushing DRSVM2HOSTRule Metrics for cluster $DRSVM2HOSTRuleMetricName to $vRopsMetricURL" -LogType "JOB-$RunDateTime" -LogFile $LogFileLo
+
+        Invoke-RestMethod -Method POST -uri $vRopsMetricURL -Body $DRSVM2HOSTRuleMetricXML -ContentType "application/xml;charset=utf-8" -Headers $vRopsAdminToken
+
+        Remove-Variable vRopsMetricURL -ErrorAction SilentlyContinue
+        Remove-Variable DRSVM2HOSTRuleMetricXML -ErrorAction SilentlyContinue
+        Remove-Variable MetricInsert -ErrorAction SilentlyContinue
+        }
+}
 Write-Host "Done Importing Custom DRS properties Clusters into vROPS"
 Log -Message "Done Importing Custom DRS properties Clusters into vROPS" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
 
@@ -735,4 +751,5 @@ Log -Message "Done Importing Custom DRS properties Clusters into vROPS" -LogType
 
 }
 
+Write-Host "Script Finished"
 Log -Message "Script Finished" -LogType "JOB-$RunDateTime" -LogFile $LogFileLoc
